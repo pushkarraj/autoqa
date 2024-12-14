@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain.prompts.chat import (
     ChatPromptTemplate,
     SystemMessagePromptTemplate,
@@ -52,7 +52,7 @@ def parse_brd(file_path):
     chat_prompt = ChatPromptTemplate.from_messages([system_message, human_message])
 
     prompt = chat_prompt.format(content=content)
-    response = llm.predict(prompt)
+    response = llm.invoke(prompt)
     print(response)
     return json.loads(response)
 
