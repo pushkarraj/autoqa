@@ -1,0 +1,12 @@
+feature_prompt: |
+  Assess the BRD document and extract detailed information on all features, functionalities, acceptable behaviors, and test cases for both admin and user roles. Ensure the final outcome is structured in a fixed JSON format. The JSON should include:
+    - Feature Name
+    - User Type (Admin/User)
+    - Functional Requirements
+    - Acceptable Behavior
+    - Test Cases for both Admin and User roles.
+  
+  Critical:
+  - Output will be a json and no other information.
+  
+  {text}

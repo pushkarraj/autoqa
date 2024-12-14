@@ -1,34 +1,36 @@
-import os
-from dotenv import load_dotenv
+import pdfplumber
 from langchain_openai import ChatOpenAI
-from langchain.prompts.chat import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
+from langchain_core.prompts.chat import ChatPromptTemplate
+from langchain.prompts import PromptTemplate
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from docx import Document
-import pdfplumber
+from selenium.webdriver.chrome.service import Service as ChromeService, Service
+from selenium.webdriver.chrome.options import Options
+import os
 import json
-import time
+import PyPDF2
+from docx import Document
+import pytest
+from dotenv import load_dotenv
 
-# Load environment variables
+from utils import load_yaml_config
+
 load_dotenv()
+
+
+script_dir = os.getcwd()
+prompt_config = load_yaml_config(os.path.join(script_dir, 'prompt.yaml'))
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = "http://3.83.24.72:8000/"  # Replace with the actual base URL
 
-# Initialize LangChain OpenAI model
+# Initialize LLM (e.g., OpenAI GPT)
 llm = ChatOpenAI(model="gpt-4", openai_api_key=OPENAI_API_KEY, temperature=0.2)
 
-
-# Function to parse BRD
+# Step 1: Parse and Analyze the BRD
 def parse_brd(file_path):
     if file_path.endswith('.docx'):
         # Extract text from .docx file
@@ -42,94 +44,111 @@ def parse_brd(file_path):
                 content += page.extract_text() + "\n"
     else:
         raise ValueError("Unsupported file format. Use .docx or .pdf files.")
+    return content
 
-    # Use LangChain to extract features and requirements
-    system_template = "You are a testing expert. Extract features and test cases from the given BRD document text."
-    human_template = "Document content:\n{content}\n\nExtract and format the output as JSON with 'features' and 'test_cases'."
-
-    system_message = SystemMessagePromptTemplate.from_template(system_template)
-    human_message = HumanMessagePromptTemplate.from_template(human_template)
-    chat_prompt = ChatPromptTemplate.from_messages([system_message, human_message])
-
-    prompt = chat_prompt.format(content=content)
-    response = llm.invoke(prompt)
-    print(response)
-    return json.loads(response)
+def analyze_requirements(brd_text):
+    prompt = PromptTemplate.from_template(prompt_config['feature_prompt'])
+    response = llm.invoke(prompt.format(text=brd_text))
+    return json.loads(response.content)
 
 
-# Function to perform automated testing with Selenium
-def perform_tests(base_url, test_cases):
-    # Setup Selenium WebDriver
+# Step 2: Inspect Webpage and Map Requirements to Web Elements
+def inspect_webpage(url, feature_requirements):
+    """Uses Selenium to inspect a webpage and map features to web elements."""
     chrome_options = Options()
-    # chrome_options.add_argument()  # Run in headless mode for automation
     driver = webdriver.Chrome(service=Service(), options=chrome_options)
-    driver.get(base_url)
+    driver.get(url)
 
-    results = []
-
-    for case in test_cases:
+    element_mappings = {}
+    for feature, requirement in feature_requirements.items():
         try:
-            feature = case["feature"]
-            actions = case["actions"]
-
-            for action in actions:
-                element = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, action["xpath"]))
-                )
-
-                if action["type"] == "click":
-                    element.click()
-                elif action["type"] == "input":
-                    element.send_keys(action["value"])
-                elif action["type"] == "hover":
-                    ActionChains(driver).move_to_element(element).perform()
-
-                time.sleep(1)  # Add delay for visual inspection during testing
-
-            results.append({"feature": feature, "status": "Pass", "details": "Executed successfully"})
+            # Example: Find a button by its text
+            element = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, f"//*[contains(text(), '{requirement}')]")
+            ))
+            element_mappings[feature] = {
+                "xpath": element.get_attribute("outerHTML"),
+                "description": requirement
+            }
         except Exception as e:
-            results.append({"feature": feature, "status": "Fail", "details": str(e)})
+            element_mappings[feature] = {"error": str(e)}
 
     driver.quit()
+    return element_mappings
+
+
+# Step 3: Automate Test Case Generation
+def generate_test_cases(feature_requirements, element_mappings):
+    """Generates Selenium-based test scripts for each feature."""
+    test_cases = {}
+    for feature, details in feature_requirements.items():
+        element_xpath = element_mappings.get(feature, {}).get("xpath")
+        if not element_xpath:
+            continue
+
+        test_script = f"""
+import pytest
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+@pytest.fixture
+def driver():
+    driver = webdriver.Chrome()
+    yield driver
+    driver.quit()
+
+def test_{feature.replace(' ', '_')}():
+    driver.get("your_test_url")
+    element = WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.XPATH, "{element_xpath}"))
+    )
+    assert element is not None
+"""
+        test_cases[feature] = test_script
+    return test_cases
+
+
+# Step 4: Execute Tests and Generate Reports
+def execute_tests(test_cases):
+    """Executes the generated test cases and captures results."""
+    results = {}
+    for feature, script in test_cases.items():
+        test_file = f"tests/test_{feature.replace(' ', '_')}.py"
+        with open(test_file, "w") as f:
+            f.write(script)
+
+        try:
+            pytest_result = pytest.main([test_file, "--maxfail=1", "--disable-warnings"])
+            results[feature] = "pass" if pytest_result == 0 else "fail"
+        except Exception as e:
+            results[feature] = f"error: {str(e)}"
+
     return results
 
 
-# Function to generate a final report
-def generate_report(results):
-    report = {
-        "summary": {
-            "total_tests": len(results),
-            "passed": len([r for r in results if r["status"] == "Pass"]),
-            "failed": len([r for r in results if r["status"] == "Fail"]),
-        },
-        "details": results,
-    }
-
-    report_path = "test_report.json"
-    with open(report_path, "w") as f:
-        json.dump(report, f, indent=4)
-
-    print(f"Test report generated: {report_path}")
+def generate_report(test_results, output_path="report.json"):
+    """Generates a report summarizing the test results."""
+    with open(output_path, "w") as f:
+        json.dump(test_results, f, indent=4)
+    print(f"Report saved to {output_path}")
 
 
-# Main function to run the testing pipeline
-def run_tests(brd_file, base_url):
-    # Step 1: Parse BRD and extract test cases
-    print("Parsing BRD and extracting test cases...")
-    requirements = parse_brd(brd_file)
-    test_cases = requirements["test_cases"]
-
-    # Step 2: Perform tests with Selenium
-    print("Performing tests on the webpage...")
-    results = perform_tests(base_url, test_cases)
-
-    # Step 3: Generate a final report
-    print("Generating final test report...")
-    generate_report(results)
-
-
-# Example usage
+# Example Execution
 if __name__ == "__main__":
-    brd_file = "BRD - HRMS.pdf"  # Replace with your BRD file path
-    base_url = BASE_URL  # Replace with your web application URL
-    run_tests(brd_file, base_url)
+    print("Parse and Analyze BRD")
+    brd_text = parse_brd("BRD - HRMS.pdf")
+    feature_requirements = analyze_requirements(brd_text)
+    print(feature_requirements)
+
+    # Step 2: Inspect Webpage
+    url = BASE_URL
+    element_mappings = inspect_webpage(url, feature_requirements)
+
+    # Step 3: Generate Test Cases
+    test_cases = generate_test_cases(feature_requirements, element_mappings)
+
+    # Step 4: Execute Tests and Generate Reports
+    test_results = execute_tests(test_cases)
+    generate_report(test_results)
